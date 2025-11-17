@@ -147,26 +147,30 @@ class Othello:
         self.board.init_board_setup()
         self.view.redraw_board()
 
-        move_tags = []
+        self.view.replay_log_lines = []
+        self.view.replay_move_tags = []
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 for line in f:
-                    self.view.log_text.insert(tkinter.END, line)
                     # 正規表現で 'X_Y' 形式のタグを安全に抽出
                     match = re.search(r'が (\d{1,2}_\d{1,2}) に配置', line)
                     if match:
-                        move_tags.append(match.group(1))
+                        # 着手情報がある行のみをログとタグリストに追加
+                        self.view.replay_log_lines.append(line.strip())
+                        self.view.replay_move_tags.append(match.group(1))
         except Exception as e:
             messagebox.showerror("エラー", f"ログファイルの読み込みに失敗しました: {e}")
             self.view.restart_game()
             return
 
-        if not move_tags:
+        if not self.view.replay_move_tags:
             messagebox.showinfo("情報", "ログファイルに着手情報が見つかりませんでした。")
             self.view.restart_game()
             return
+
+        self.view.display_replay_log()
         self.view.log_text.config(state=tkinter.DISABLED) # ログを編集不可に
-        self.view.start_replay_moves(move_tags)
+        self.view.start_replay_moves(self.view.replay_move_tags)
 
     # --- 打てるマス検索 ---
     def search_avalable_cell(self):
@@ -336,6 +340,7 @@ class TkView:
         self.replay_controls = [] # リプレイ用のUI要素を保持するリスト
         self.update_loop_id = None # afterのジョブIDを保持
         self.cpu_turn_job_id = None # CPU思考処理のafterジョブID
+        self.replay_log_lines = [] # リプレイ用のログ行を保持
         self.replay_job_id = None # リプレイ再生のafterジョブID
         self.avalable_cell_tags = []
 
@@ -657,13 +662,42 @@ class TkView:
     def highlight_log_line(self):
         """ログの指定された行をハイライトする"""
         self.log_text.tag_remove("highlight", "1.0", tkinter.END)
-        if self.replay_index < len(self.replay_move_tags):
-            # ログは1から始まるので +1
-            line_to_highlight = self.replay_index + 1
+        # replay_indexは次に実行される手のインデックス
+        # 最後の着手後もハイライトするため、<= で比較
+        if self.replay_index <= len(self.replay_move_tags):
+            # ログ行は1から始まるので、インデックスに1を足す
+            # ただし、最後の着手後は replay_index が move_tags の長さと等しくなるので、
+            # その場合は最後の行をハイライトするように調整する
+            line_to_highlight = min(self.replay_index + 1, len(self.replay_move_tags))
+
+            # ハイライト対象行が存在する場合のみ処理
+            if line_to_highlight == 0: return
+
             start_index = f"{line_to_highlight}.0"
             end_index = f"{line_to_highlight}.end"
             self.log_text.tag_add("highlight", start_index, end_index)
             self.log_text.see(start_index)
+
+    def display_replay_log(self):
+        """リプレイ用のログをTextウィジェットに表示する"""
+        self.log_text.config(state=tkinter.NORMAL)
+        self.log_text.delete("1.0", tkinter.END)
+        for line in self.replay_log_lines:
+            # update_log_display と同様のロジックで色付けしながら挿入
+            parts = line.split(" ")
+            turn_count_str = parts[0]
+            player_str = parts[1]
+            rest_of_line = " ".join(parts[2:])
+
+            self.log_text.insert(tkinter.END, turn_count_str + " ")
+            if "黒(先)" in player_str:
+                self.log_text.insert(tkinter.END, player_str, "black_player")
+            elif "白(後)" in player_str:
+                self.log_text.insert(tkinter.END, player_str, "white_player")
+            else:
+                self.log_text.insert(tkinter.END, player_str)
+            self.log_text.insert(tkinter.END, " " + rest_of_line + "\n")
+        self.log_text.config(state=tkinter.DISABLED)
 
     # mode_2クリック時(human vs random)
     def mode_2_clicked(self):
@@ -1015,12 +1049,25 @@ class TkView:
             initialfile=f"othello_log_{datetime.now():%Y%m%d_%H%M%S}.txt"
         )
 
-        # ファイルパスが選択された場合（キャンセルされなかった場合）
         if file_path:
-            # Textウィジェットから内容を取得
-            log_content = self.log_text.get("1.0", tkinter.END)
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(log_content)
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write("--- Othello Play Log ---\n")
+                    log_content = self.log_text.get("1.0", tkinter.END)
+                    f.write(log_content)
+
+                    # ゲームが終了している場合、結果も追記する
+                    if self.board.finish_flag:
+                        black_count, white_count = self.board.result_count
+                        f.write("\n--- Result ---\n")
+                        f.write(f"先手 (黒): {black_count}\n")
+                        f.write(f"後手 (白): {white_count}\n")
+                        winner = "引き分け"
+                        if black_count > white_count: winner = "先手(黒)"
+                        elif white_count > black_count: winner = "後手(白)"
+                        f.write(f"勝者: {winner}\n")
+            except Exception as e:
+                messagebox.showerror("エラー", f"ログファイルの保存に失敗しました: {e}")
 
 
 # --- ゲームプレイヤーのクラスを定義する ---
@@ -1521,23 +1568,8 @@ class Board:
         view.log_text.see(tkinter.END)
 
         self.result_count = [black_count, white_count]
+        self.result_write_flag = True
 
-        filename = f"othello_log_{datetime.now():%Y%m%d_%H%M%S}.txt"
-        try:
-            with open(filename, "w", encoding="utf-8") as f:
-                f.write("--- Othello Play Log ---\n")
-                log_content = view.log_text.get("1.0", tkinter.END)
-                f.write(log_content)
-                f.write("\n--- Result ---\n")
-                f.write(f"先手 (黒): {black_count}\n")
-                f.write(f"後手 (白): {white_count}\n")
-                winner = "引き分け"
-                if black_count > white_count: winner = "先手(黒)"
-                elif white_count > black_count: winner = "後手(白)"
-                f.write(f"勝者: {winner}\n")
-            self.result_write_flag = True
-        except Exception as e:
-            print(f"ログファイルの保存に失敗しました: {e}")
 
     def get_stats_text(self):
         """統計情報を整形して文字列として返す"""
